@@ -12,7 +12,7 @@
 """This package provides Python interfaces to Comdb2 databases.
 
 Two different Python submodules are provided for interacting with Comdb2
-databases.  Both submodules work from Python 2.7+ and from Python 3.5+.
+databases.
 
 `comdb2.dbapi2` provides an interface that conforms to `the Python Database API
 Specification v2.0 <https://www.python.org/dev/peps/pep-0249/>`_.  If you're
@@ -28,4 +28,6 @@ anticipate a need to interact with libraries that require DB-API compliant
 connections, this module may be simpler to get started with.
 """
 
-from ._about import *
+from ._about import __version__
+
+__all__ = ["__version__"]

@@ -9,10 +9,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import unicode_literals, absolute_import
 
 from comdb2 import cdb2
-import pytz
 import dateutil.tz
 import pytest
 
@@ -85,21 +83,34 @@ def test_datetimeus_fromtimestamp():
 
 
 def test_datetimeus_astimezone():
-    eastern = pytz.timezone('US/Eastern')
-    loc_dt = eastern.localize(datetime.datetime(2002, 10, 27, 6, 0, 0))
+    eastern = dateutil.tz.gettz("US/Eastern")
+    loc_dt = datetime.datetime(2002, 10, 27, 6, 0, 0, tzinfo=eastern)
     dtu = cdb2.DatetimeUs.fromdatetime(loc_dt)
 
-    assert type(dtu.astimezone(pytz.utc)) == cdb2.DatetimeUs
+    assert type(dtu.astimezone(datetime.timezone.utc)) == cdb2.DatetimeUs
+
+
+def test_datetimeus_as_datetime_naive():
+    dtu = cdb2.DatetimeUs.fromtimestamp(time.time())
+    dt = dtu.as_datetime()
+    assert type(dt) == datetime.datetime
+    assert dt == dtu
+
+
+def test_datetimeus_as_datetime_with_tz():
+    dtu = cdb2.DatetimeUs.fromtimestamp(time.time(), tz=datetime.timezone.utc)
+    dt = dtu.as_datetime()
+    assert type(dt) == datetime.datetime
+    assert dt == dtu
 
 
 def test_datetimeus_type_stickiness():
     def check(obj):
         assert isinstance(obj, cdb2.DatetimeUs)
 
-    new_york = pytz.timezone('America/New_York')
-    utc = pytz.UTC
+    new_york = dateutil.tz.gettz("America/New_York")
+    utc = datetime.timezone.utc
 
-    check(new_york.localize(cdb2.DatetimeUs(2016, 8, 15, 18, 47, 15, 123456)))
     check(cdb2.DatetimeUs(2016, 8, 15, 18, 47, 15, 123456, new_york))
     check(cdb2.DatetimeUs(2016, 8, 15, 18, 47, 15, 123456))
     check(cdb2.DatetimeUs.today())
@@ -115,21 +126,22 @@ def test_datetimeus_type_stickiness():
     check(cdb2.DatetimeUs.now() - datetime.timedelta(0))
     check(cdb2.DatetimeUs.now() + datetime.timedelta(0))
     check(datetime.timedelta(0) + cdb2.DatetimeUs.now())
-    check(cdb2.DatetimeUs.now().replace(year=2015))
+    check(cdb2.DatetimeUs.now().replace(year=2016))
     check(cdb2.DatetimeUs.now().replace(tzinfo=new_york))
     check(cdb2.DatetimeUs.now(utc).astimezone(new_york))
 
 
-@pytest.mark.skipif(not hasattr(datetime.datetime, 'fold'),
-                    reason='Skipped before PEP 495')
+@pytest.mark.skipif(
+    not hasattr(datetime.datetime, "fold"), reason="Skipped before PEP 495"
+)
 def test_datetimeus_fold():
-    NYC = dateutil.tz.gettz('America/New_York')
+    NYC = dateutil.tz.gettz("America/New_York")
     dt = datetime.datetime(2004, 10, 31, 1, 30, fold=1, tzinfo=NYC)
 
     dtus = cdb2.DatetimeUs.fromdatetime(dt)
 
-    assert dtus.fold == 1    # Check that it handles fold correctly
+    assert dtus.fold == 1  # Check that it handles fold correctly
 
     # Make sure that the time is correctly disambiguating
-    assert dt.tzname() == "EST"     # Just in case it's not a DatetimeUs problem
+    assert dt.tzname() == "EST"  # Just in case it's not a DatetimeUs problem
     assert dtus.tzname() == "EST"

@@ -2,17 +2,16 @@
 Best Practices, Tips, and Tricks
 ********************************
 
-#. This package uses `six.text_type` for text and `bytes` for blobs; this may
-   be surprising if you're using `str` in Python 2.  See :doc:`types` for an
-   explanation of what Python types must be used when binding parameters, and
-   what Python types will be returned for result columns.
+#. This package uses `str` for text and `bytes` for blobs. See :doc:`types` for
+   an explanation of what Python types must be used when binding parameters,
+   and what Python types will be returned for result columns.
 
    An error message saying "incompatible values from SQL blob of length 3 to
    bcstring field 'foo'" most likely means that you passed a byte string where
    a unicode string should have been passed.
 
    An error message saying "incompatible values from SQL string of length 3 to
-   bbytearray field 'bar'" most likely means that you passed a unicode string
+   bytearray field 'bar'" most likely means that you passed a unicode string
    where a byte string should have been passed.  Note the byte string must be 
    *exactly* the length of the column.  No padding is performed automatically,
    unless the column is declared with a ``dbpad`` attribute in the csc2 schema 
@@ -24,11 +23,8 @@ Best Practices, Tips, and Tricks
    a ``WHERE`` clause that you expected to match some rows will silently fail
    to match any.
 
-#. Prefer using Python 3 rather than Python 2 when possible.  The above type
-   mappings are much more intuitive in Python 3 than in Python 2.  If you can't
-   use Python 3 but are writing a new module, prefer to use ``from __future__
-   import unicode_literals`` to opt into forward compatible unicode string
-   literals (rather than the default, string literals as byte strings).
+#. The latest version of this package only supports Python 3. If you can't
+   use Python 3, make sure to use version less than ``1.5.0``.
 
 #. The database can time out connections that have been idle for a period of
    time, and each idle connection uses some amount of resources on the database
@@ -60,19 +56,41 @@ Best Practices, Tips, and Tricks
 
    Because of this: https://xkcd.com/327/
 
+   When using comdb2 R8, you can even bind a `list` or `tuple` object like so::
+
+       c.execute(
+           "SELECT %(needle)s IN CARRAY(%(haystack)s)",
+           {'needle': 5, 'haystack': [1, 2, 3, 4, 5]}
+       )
+
    .. note::
        The two modules provided by this package use different syntax for SQL
        placeholders.  See `.dbapi2.Cursor.execute` and `.cdb2.Handle.execute`
        for details.
 
-#. For `.dbapi2`, be sure to escape any ``%`` signs in a query by doubling
-   them.  That is, instead of::
+#. When using `.dbapi2` but not parameter binding by position be sure to escape
+   any literal ``%`` signs in a query by doubling them.  That is, instead of::
 
-       c.execute("select * from tbl where col like 'foo%'")
+        cursor.execute(
+            "select * from log where msg like 'ERROR: %' and pid = %(pid)s",
+            {"pid": 1234},
+        )
 
    You need to write::
 
-       c.execute("select * from tbl where col like 'foo%%'")
+        cursor.execute(
+            "select * from log where msg like 'ERROR: %%' and pid = %(pid)s",
+            {"pid": 1234},
+        )
+
+   Also, if you don't want to pass any parameters to a `.dbapi2` query, it's
+   better to pass ``()`` than the default ``None`` value, because this removes
+   the need to escape any literal ``%`` signs that appear in the query::
+
+        cursor.execute(
+            "select * from log where msg like 'ERROR: %'",
+            (),
+        )
 
    See `.dbapi2.paramstyle` for an explanation of why.
 
@@ -83,8 +101,23 @@ Best Practices, Tips, and Tricks
    `.cdb2.Handle` (any isolation level higher than ``READ COMMITTED`` would
    obviously work as well).
 
-#. The underlying API doesn't currently allow binding lists. The following snippet
-   will be useful for a ``$var in $list`` query with a dynamically generated list::
+#. When using comdb2 R8, the library supports binding of (non-empty) `list` or
+   `tuple` objects with the help of the ``CARRAY`` function, as long as all
+   elements of the sequence are of the same type::
+
+        from comdb2.dbapi2 import connect
+
+        def search_in_list(needle, haystack):
+            params = {'needle': needle, 'haystack': haystack}
+            sql = "select %(needle)s in CARRAY(%(haystack)s)"
+            print(connect('mattdb').cursor().execute(sql, params).fetchall())
+
+        haystack = [1, 2, 3, 4, 5]
+        search_in_list(0, haystack)
+        search_in_list(5, haystack)
+
+  If you still need to use R7, you would want to generate the query
+  dynamically, for example::
 
         from comdb2.dbapi2 import connect
 

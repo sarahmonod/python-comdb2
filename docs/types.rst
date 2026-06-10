@@ -14,10 +14,11 @@ SQL type       Python type
 NULL           ``None``
 integer        `int`
 real           `float`
-blob           `six.binary_type` (aka `bytes` in Python 3, ``str`` in Python 2)
-text           `six.text_type` (aka `str` in Python 3, ``unicode`` in Python 2)
+blob           `bytes`
+text           `str`
 datetime       `datetime.datetime`
 datetimeus     `~.cdb2.DatetimeUs`
+carray         `list` or `tuple` of exactly one of the types above (R8 only)
 intervalym     not supported
 intervalds     not supported
 intervaldsus   not supported
@@ -42,47 +43,11 @@ into a column of type ``short``), an exception will be raised.
 String and Blob Types
 =====================
 
-This module uses byte strings to represent BLOB values, and Unicode strings to
-represent TEXT columns.  This was chosen for maximum forward compatibility with
-Python 3, and to make it easier to write code that will work identically in
-both languages.  This decision has many important ramifications.
+You may occasionally need to convert between byte strings and Unicode strings:
 
-#.  In Python 2, ``'foo'`` is the wrong type for binding a ``cstring`` column.
-    You instead need to use a Unicode literal like ``u'foo'``.
-    Alternately, you can make all string literals in your module be Unicode
-    literals by default by doing::
-
-        from __future__ import unicode_literals
-
-    .. note::
-        It's not safe to blindly do this in existing code as it changes that
-        code's behavior, and might cause problems.
-
-#.  If you have a variable  of type `six.binary_type` (byte string) and you
-    want to pass it to the database as a TEXT value, you need to convert it to
-    a `six.text_type` (Unicode) string using `~bytes.decode`.  In Python 2,
-    unless ``unicode_literals`` was imported from `__future__`, you will need to
-    do this with every string variable that you want to use as a cstring
-    column.  For example::
-
-        value = 'foo'
-        params = {'col': value.decode('utf-8')}
-        # dbapi2
-        cursor.execute("select * from tbl where col=%(col)s", params)
-        # cdb2
-        handle.execute("select * from tbl where col=@col", params)
-
-#.  TEXT columns are returned to you as `six.text_type` (Unicode) strings.
-    If you need to pass them to a library that expects `six.binary_type` (byte)
-    strings, you have to use `~str.encode`, like this::
-
-        cursor.execute("select col from tbl")
-        for row in cursor:
-            col = row[0]
-            library_func(col.encode('utf-8'))
-
-    This may come up a lot in Python 2, where historically libraries were
-    written to expect byte strings rather than Unicode strings.
+#.  If you have a variable of type `bytes` and you want to pass it to the
+    database as a TEXT value, you need to convert it to a `str` using
+    `~bytes.decode`.
 
 #.  When a TEXT column is read back from the database, it is decoded as UTF-8.
     If your database has non-UTF-8 text in a ``cstring`` column, you need to
@@ -91,14 +56,14 @@ both languages.  This decision has many important ramifications.
 
         cursor.execute("select cast(col as blob) from tbl")
 
-    That will result in you receiving a byte string rather than a Unicode
-    string for that result column.
+    That will result in you receiving a `bytes` object rather than `str` for
+    that result column.
 
     .. note::
         ASCII is a subset of UTF-8, so this is not required for if the column
         contains plain ASCII text.
 
-#.  Likewise, when a Unicode string is sent to the database, it is encoded as
+#.  Likewise, when a `str` object is sent to the database, it is encoded as
     UTF-8.  If you need to store non-UTF-8 text in a ``cstring`` column in your
     database, you need to bind a byte string in Python land, and then cast the
     value from BLOB to TEXT in SQL.  For instance, to bind a latin1 string
@@ -126,9 +91,8 @@ Whenever either type of datetime is retrieved as a result column, the returned
 `datetime.datetime` object will be aware, meaning it will be associated with
 a timezone (namely, the current timezone of the Comdb2 connection). Whenever
 either type of datetime is sent as a query parameter, it is permitted to be
-naïve, in which case it uses the current timezone of the Comdb2 connection.  By
-default that timezone is UTC but it can be changed on a per-connection basis if
-needed.
+naïve, in which case it is treated as UTC (and *not* as the system's local
+time, which is the more common interpretation in newer Python libraries).
 
 Comdb2 additionally supports three types for representing time intervals. One
 represents an exact number of elapsed milliseconds between two times
@@ -147,3 +111,25 @@ string columns.  That currently makes it impossible to map them to Python's
 `decimal.Decimal` type as we would like to.  If ``libcdb2api`` is ever changed
 to properly distinguish between DECIMAL and TEXT columns this package will be
 enhanced to properly expose DECIMAL columns.
+
+C Array Types
+=============
+
+.. note::
+   This only works with comdb2 R8. If you need to connect to a database that is
+   still running comdb2 R7, the queries using this feature will fail.
+
+Often in SQL queries, it is useful to bind an array of elements of the same
+type, for example when using the ``IN`` operator. In this case, you can use a
+(non-empty) `list` or `tuple`, as long as all elements of the sequence are of
+the same type (and one of the above Python types). Note that nested sequences
+are not allowed.
+
+Note that when binding an element of that type, you want to use the ``CARRAY``
+function, like so::
+
+   params = {'arr': [1, 2, 3, 4]}
+   # dbapi2
+   c.execute("select 2 in CARRAY(%(arr)s)", params)
+   # cdb2
+   h.execute("select 2 in CARRAY(@arr)", params)

@@ -99,10 +99,15 @@ Parameter Binding
 -----------------
 
 In real applications you'll often need to pass parameters into a SQL query.
-This is done using parameter binding - in the query, placeholders are specified
-using ``%(name)s``, and a mapping of ``name`` to parameter value is passed to
-`Cursor.execute` along with the query.  The ``%(`` and ``)s`` are fixed, and
-the ``name`` between them varies for each parameter.  For example:
+This is done using parameter binding, either by name or by position.
+
+By Name
+~~~~~~~
+
+In the query, placeholders are specified using ``%(name)s``, and a mapping of
+``name`` to parameter value is passed to `Cursor.execute` along with the query.
+The ``%(`` and ``)s`` are fixed, and the ``name`` inside them varies for each
+parameter.  For example:
 
     >>> query = "select 25 between %(a)s and %(b)s"
     >>> print(conn.cursor().execute(query, {'a': 20, 'b': 42}).fetchall())
@@ -114,16 +119,58 @@ the ``name`` between them varies for each parameter.  For example:
 In this example, we run the query with two different sets of
 parameters, producing different results.  First, we execute the query with
 parameter ``a`` bound to ``20`` and ``b`` bound to ``42``.  In this case,
-because ``20 <= 25 <= 42``, the expression evaluates to true, and a ``1`` is
-returned.
+because ``20 <= 25 <= 42``, the expression evaluates to true, and a row
+containing a single column with a value of ``1`` is returned.
 
-When we run the same query with parameter ``b`` bound to ``23``, a ``0`` is
-returned instead, because ``20 <= 25 <= 23`` is false.
+When we run the same query with parameter ``b`` bound to ``23``, a row
+containing a single column with a value of ``0`` is returned instead, because
+``20 <= 25 <= 23`` is false.
 
-Note:
-    Because parameters are bound using ``%(name)s``, other ``%`` signs in
+Warning:
+    Because named parameters are bound using ``%(name)s``, other ``%`` signs in
     a query must be escaped.  For example, ``WHERE name like 'M%'`` becomes
     ``WHERE name LIKE 'M%%'``.
+
+Danger:
+    This applies even when no parameters are passed at all - passing ``None``
+    or no parameters behaves the same as passing an empty `dict`.
+
+By Position
+~~~~~~~~~~~
+
+You can bind parameters positionally rather than by name, by using ``?``
+for each placeholder and providing a list or tuple of parameter values.
+For example:
+
+    >>> query = "select 25 between ? and ?"
+    >>> print(conn.cursor().execute(query, [20, 42]).fetchall())
+    [[1]]
+
+In this example, we execute the query with the first ``?`` bound to 20 and the
+second ``?`` bound to 42, so a row with a single column with a value of ``1``
+is returned like in the previous example.
+
+Warning:
+    Unlike when binding parameters by name, you must not escape ``%`` signs in
+    the SQL when binding parameters positionally.
+
+    For example, you could do ``WHERE val % 5 = ?``, but not ``WHERE val %% 5 = ?``.
+
+Tip:
+    You can pass an empty tuple of parameters to avoid the need to escape ``%``
+    signs in the SQL even when you don't want to bind any parameters, like:
+
+    >>> query = "select 42 % 20"
+    >>> print(conn.cursor().execute(query, ()).fetchall())
+    [[2]]
+
+    Compare this against what happens if you don't pass any parameters at all:
+
+    >>> print(conn.cursor().execute(query).fetchall())
+    Traceback (most recent call last):
+    ...
+    comdb2.dbapi2.InterfaceError: Invalid Python format string for query
+
 
 Types
 -----
@@ -138,8 +185,8 @@ SQL type       Python type
 NULL           ``None``
 integer        `int`
 real           `float`
-blob           `six.binary_type` (aka `bytes` in Python 3, ``str`` in Python 2)
-text           `six.text_type` (aka `str` in Python 3, ``unicode`` in Python 2)
+blob           `bytes`
+text           `str`
 datetime       `datetime.datetime`
 datetimeus     `DatetimeUs`
 ============   ================================================================
@@ -239,27 +286,57 @@ specific exceptions:
    `Connection.cursor` is called, we call `Cursor.close` on any existing, open
    cursor for that connection.
 """
-from __future__ import absolute_import, unicode_literals
+
+from __future__ import annotations
 
 import functools
 import itertools
 import weakref
 import datetime
 import re
-import six
 
 from . import cdb2
+from .cdb2 import ColumnType, Row, Value, ParameterValue
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Any, List
 
-__all__ = ['apilevel', 'threadsafety', 'paramstyle',
-           'connect', 'Connection', 'Cursor',
-           'STRING', 'BINARY', 'NUMBER', 'DATETIME', 'ROWID',
-           'Datetime', 'DatetimeUs', 'Binary', 'Timestamp', 'TimestampUs',
-           'DatetimeFromTicks', 'DatetimeUsFromTicks', 'TimestampFromTicks',
-           'Error', 'Warning', 'InterfaceError', 'DatabaseError',
-           'InternalError', 'OperationalError', 'ProgrammingError',
-           'IntegrityError', 'DataError', 'NotSupportedError',
-           'UniqueKeyConstraintError', 'ForeignKeyConstraintError',
-           'NonNullConstraintError']
+__all__ = [
+    "apilevel",
+    "threadsafety",
+    "paramstyle",
+    "connect",
+    "ColumnType",
+    "Connection",
+    "Cursor",
+    "STRING",
+    "BINARY",
+    "NUMBER",
+    "DATETIME",
+    "ROWID",
+    "Datetime",
+    "DatetimeUs",
+    "Binary",
+    "Timestamp",
+    "TimestampUs",
+    "DatetimeFromTicks",
+    "DatetimeUsFromTicks",
+    "TimestampFromTicks",
+    "Error",
+    "Warning",
+    "InterfaceError",
+    "DatabaseError",
+    "InternalError",
+    "OperationalError",
+    "ProgrammingError",
+    "IntegrityError",
+    "DataError",
+    "NotSupportedError",
+    "UniqueKeyConstraintError",
+    "ForeignKeyConstraintError",
+    "NonNullConstraintError",
+    "Value",
+    "ParameterValue",
+]
 
 apilevel = "2.0"
 """This module conforms to the Python Database API Specification 2.0."""
@@ -273,17 +350,31 @@ paramstyle = "pyformat"
 Comdb2's native placeholder format is ``@name``, but that cannot be used by
 this module because it's not an acceptable `DB-API 2.0 placeholder style
 <https://www.python.org/dev/peps/pep-0249/#paramstyle>`_.  This module uses
-``pyformat`` because it is the only DB-API 2.0 paramstyle that we can translate
-into Comdb2's placeholder format without needing a SQL parser.
+``pyformat`` for named parameters because it is the only DB-API 2.0 paramstyle
+that we can translate into Comdb2's placeholder format without needing
+a SQL parser. This module also supports the ``qmark`` parameter style for
+binding parameters positionally.
 
 Note:
     An int value is bound as ``%(my_int)s``, not as ``%(my_int)d`` - the last
     character is always ``s``.
 
 Note:
-    Because SQL strings for this module use the ``pyformat`` placeholder style,
-    any literal ``%`` characters in a query must be escaped by doubling them.
-    ``WHERE name like 'M%'`` becomes ``WHERE name LIKE 'M%%'``.
+    When binding parameters by name, any ``%`` sign is recognized as the start
+    of a ``pyformat`` style placeholder, and so any literal ``%`` characters in
+    a SQL statement must be escaped by doubling. ``WHERE name like 'M%'``
+    becomes ``WHERE name LIKE 'M%%'``. This does not apply when binding
+    parameters positionally with ``?`` placeholders, nor when the literal ``%``
+    appears in a parameter value as opposed to literally in the query.
+    In either of those cases, the ``%`` characters must not be escaped.
+
+Warning:
+    Literal ``%`` signs in the query must be escaped when no parameters are
+    passed at all -- passing ``None`` or no parameters behaves the same as
+    passing an empty `dict`. You can avoid the need to escape ``%`` signs in
+    an unparametrized query by instead passing an empty `tuple` as parameters,
+    which causes the statement to be treated as having ``qmark`` placeholders
+    instead of ``pyformat`` placeholders.
 """
 
 _FIRST_WORD_OF_STMT = re.compile(
@@ -298,13 +389,13 @@ _FIRST_WORD_OF_STMT = re.compile(
     \s*           # then skip over any whitespace
     (\w+)         # and capture the first word
     """,
-    re.VERBOSE | re.DOTALL | (0 if six.PY2 else re.ASCII),
+    re.VERBOSE | re.DOTALL | re.ASCII,
 )
-_VALID_SP_NAME = re.compile(r'^[A-Za-z0-9_.]+$')
+_VALID_SP_NAME = re.compile(r"^[A-Za-z0-9_.]+$")
 
 
 @functools.total_ordering
-class _TypeObject(object):
+class _TypeObject:
     def __init__(self, *value_names):
         self.value_names = value_names
         self.values = [cdb2.TYPE[v] for v in value_names]
@@ -316,24 +407,25 @@ class _TypeObject(object):
         return self != other and other < self.values
 
     def __repr__(self):
-        return 'TypeObject' + str(self.value_names)
+        return "TypeObject" + str(self.value_names)
 
 
-def _binary(string):
-    if isinstance(string, six.text_type):
-        return string.encode('utf-8')
+def _binary(string: str | bytes) -> bytes:
+    if isinstance(string, str):
+        return string.encode("utf-8")
     return bytes(string)
 
-STRING = _TypeObject('CSTRING')
+
+STRING = _TypeObject("CSTRING")
 """The type codes of TEXT result columns compare equal to this constant."""
 
-BINARY = _TypeObject('BLOB')
+BINARY = _TypeObject("BLOB")
 """The type codes of BLOB result columns compare equal to this constant."""
 
-NUMBER = _TypeObject('INTEGER', 'REAL')
+NUMBER = _TypeObject("INTEGER", "REAL")
 """The type codes of numeric result columns compare equal to this constant."""
 
-DATETIME = _TypeObject('DATETIME', 'DATETIMEUS')
+DATETIME = _TypeObject("DATETIME", "DATETIMEUS")
 """The type codes of datetime result columns compare equal to this constant."""
 
 ROWID = STRING
@@ -350,10 +442,7 @@ DatetimeUsFromTicks = DatetimeUs.fromtimestamp
 TimestampFromTicks = Timestamp.fromtimestamp
 TimestampUsFromTicks = TimestampUs.fromtimestamp
 
-try:
-    UserException = StandardError  # Python 2
-except NameError:
-    UserException = Exception      # Python 3
+UserException = Exception
 
 
 class Error(UserException):
@@ -364,6 +453,7 @@ class Error(UserException):
     `Connection` objects, to simplify error handling in environments where
     multiple connections from different modules are used.
     """
+
     pass
 
 
@@ -372,21 +462,25 @@ class Warning(UserException):
 
     This is required to exist by the DB-API interface, but we never raise it.
     """
+
     pass
 
 
 class InterfaceError(Error):
     """Exception raised for errors caused by misuse of this module."""
+
     pass
 
 
 class DatabaseError(Error):
     """Base class for all errors reported by the database."""
+
     pass
 
 
 class InternalError(DatabaseError):
     """Exception raised for internal errors reported by the database."""
+
     pass
 
 
@@ -396,6 +490,7 @@ class OperationalError(DatabaseError):
     These errors are not necessarily the result of a bug either in the
     application or in the database - for example, dropped connections.
     """
+
     pass
 
 
@@ -405,6 +500,7 @@ class ProgrammingError(DatabaseError):
     For example, this will be raised for syntactically incorrect SQL, or for
     passing a different number of parameters than are required by the query.
     """
+
     pass
 
 
@@ -416,6 +512,7 @@ class IntegrityError(DatabaseError):
     an index may not have duplicates.  Other types of constraint violations may
     raise this type directly.
     """
+
     pass
 
 
@@ -428,6 +525,7 @@ class UniqueKeyConstraintError(IntegrityError):
 
     .. versionadded:: 1.1
     """
+
     pass
 
 
@@ -444,6 +542,7 @@ class ForeignKeyConstraintError(IntegrityError):
 
     .. versionadded:: 1.1
     """
+
     pass
 
 
@@ -456,6 +555,7 @@ class NonNullConstraintError(IntegrityError):
 
     .. versionadded:: 1.1
     """
+
     pass
 
 
@@ -466,68 +566,60 @@ class DataError(DatabaseError):
     of range for the column type that would store it, or if you specify an
     invalid timezone name for the connection.
     """
+
     pass
 
 
 class NotSupportedError(DatabaseError):
     """Exception raised when unsupported operations are attempted."""
+
     pass
 
 
 _EXCEPTION_BY_RC = {
-    cdb2.ERROR_CODE['CONNECT_ERROR']         : OperationalError,
-    cdb2.ERROR_CODE['NOTCONNECTED']          : ProgrammingError,
-    cdb2.ERROR_CODE['PREPARE_ERROR']         : ProgrammingError,
-    cdb2.ERROR_CODE['IO_ERROR']              : OperationalError,
-    cdb2.ERROR_CODE['INTERNAL']              : InternalError,
-    cdb2.ERROR_CODE['NOSTATEMENT']           : ProgrammingError,
-    cdb2.ERROR_CODE['BADCOLUMN']             : ProgrammingError,
-    cdb2.ERROR_CODE['BADSTATE']              : ProgrammingError,
-    cdb2.ERROR_CODE['ASYNCERR']              : OperationalError,
-
-    cdb2.ERROR_CODE['INVALID_ID']            : InternalError,
-    cdb2.ERROR_CODE['RECORD_OUT_OF_RANGE']   : OperationalError,
-
-    cdb2.ERROR_CODE['REJECTED']              : OperationalError,
-    cdb2.ERROR_CODE['STOPPED']               : OperationalError,
-    cdb2.ERROR_CODE['BADREQ']                : OperationalError,
-    cdb2.ERROR_CODE['DBCREATE_FAILED']       : OperationalError,
-
-    cdb2.ERROR_CODE['THREADPOOL_INTERNAL']   : OperationalError,
-    cdb2.ERROR_CODE['READONLY']              : NotSupportedError,
-
-    cdb2.ERROR_CODE['NOMASTER']              : InternalError,
-    cdb2.ERROR_CODE['UNTAGGED_DATABASE']     : NotSupportedError,
-    cdb2.ERROR_CODE['CONSTRAINTS']           : IntegrityError,
-    cdb2.ERROR_CODE['DEADLOCK']              : OperationalError,
-
-    cdb2.ERROR_CODE['TRAN_IO_ERROR']         : OperationalError,
-    cdb2.ERROR_CODE['ACCESS']                : OperationalError,
-
-    cdb2.ERROR_CODE['TRAN_MODE_UNSUPPORTED'] : NotSupportedError,
-
-    cdb2.ERROR_CODE['VERIFY_ERROR']          : OperationalError,
-    cdb2.ERROR_CODE['FKEY_VIOLATION']        : ForeignKeyConstraintError,
-    cdb2.ERROR_CODE['NULL_CONSTRAINT']       : NonNullConstraintError,
-
-    cdb2.ERROR_CODE['CONV_FAIL']             : DataError,
-    cdb2.ERROR_CODE['NONKLESS']              : NotSupportedError,
-    cdb2.ERROR_CODE['MALLOC']                : OperationalError,
-    cdb2.ERROR_CODE['NOTSUPPORTED']          : NotSupportedError,
-
-    cdb2.ERROR_CODE['DUPLICATE']             : UniqueKeyConstraintError,
-    cdb2.ERROR_CODE['TZNAME_FAIL']           : DataError,
-
-    cdb2.ERROR_CODE['UNKNOWN']               : OperationalError,
+    cdb2.ERROR_CODE["CONNECT_ERROR"]: OperationalError,
+    cdb2.ERROR_CODE["NOTCONNECTED"]: ProgrammingError,
+    cdb2.ERROR_CODE["PREPARE_ERROR"]: ProgrammingError,
+    cdb2.ERROR_CODE["IO_ERROR"]: OperationalError,
+    cdb2.ERROR_CODE["INTERNAL"]: InternalError,
+    cdb2.ERROR_CODE["NOSTATEMENT"]: ProgrammingError,
+    cdb2.ERROR_CODE["BADCOLUMN"]: ProgrammingError,
+    cdb2.ERROR_CODE["BADSTATE"]: ProgrammingError,
+    cdb2.ERROR_CODE["ASYNCERR"]: OperationalError,
+    cdb2.ERROR_CODE["INVALID_ID"]: InternalError,
+    cdb2.ERROR_CODE["RECORD_OUT_OF_RANGE"]: OperationalError,
+    cdb2.ERROR_CODE["REJECTED"]: OperationalError,
+    cdb2.ERROR_CODE["STOPPED"]: OperationalError,
+    cdb2.ERROR_CODE["BADREQ"]: OperationalError,
+    cdb2.ERROR_CODE["DBCREATE_FAILED"]: OperationalError,
+    cdb2.ERROR_CODE["THREADPOOL_INTERNAL"]: OperationalError,
+    cdb2.ERROR_CODE["READONLY"]: NotSupportedError,
+    cdb2.ERROR_CODE["NOMASTER"]: InternalError,
+    cdb2.ERROR_CODE["UNTAGGED_DATABASE"]: NotSupportedError,
+    cdb2.ERROR_CODE["CONSTRAINTS"]: IntegrityError,
+    cdb2.ERROR_CODE["DEADLOCK"]: OperationalError,
+    cdb2.ERROR_CODE["TRAN_IO_ERROR"]: OperationalError,
+    cdb2.ERROR_CODE["ACCESS"]: OperationalError,
+    cdb2.ERROR_CODE["TRAN_MODE_UNSUPPORTED"]: NotSupportedError,
+    cdb2.ERROR_CODE["VERIFY_ERROR"]: OperationalError,
+    cdb2.ERROR_CODE["FKEY_VIOLATION"]: ForeignKeyConstraintError,
+    cdb2.ERROR_CODE["NULL_CONSTRAINT"]: NonNullConstraintError,
+    cdb2.ERROR_CODE["CONV_FAIL"]: DataError,
+    cdb2.ERROR_CODE["NONKLESS"]: NotSupportedError,
+    cdb2.ERROR_CODE["MALLOC"]: OperationalError,
+    cdb2.ERROR_CODE["NOTSUPPORTED"]: NotSupportedError,
+    cdb2.ERROR_CODE["DUPLICATE"]: UniqueKeyConstraintError,
+    cdb2.ERROR_CODE["TZNAME_FAIL"]: DataError,
+    cdb2.ERROR_CODE["UNKNOWN"]: OperationalError,
 }
 
 
 def _raise_wrapped_exception(exc):
     code = exc.error_code
-    msg = '%s (cdb2api rc %d)' % (exc.error_message, code)
+    msg = "%s (cdb2api rc %d)" % (exc.error_message, code)
     if "null constraint violation" in msg:
-        six.raise_from(NonNullConstraintError(msg), exc)  # DRQS 86013831
-    six.raise_from(_EXCEPTION_BY_RC.get(code, OperationalError)(msg), exc)
+        raise NonNullConstraintError(msg) from exc  # DRQS 86013831
+    raise _EXCEPTION_BY_RC.get(code, OperationalError)(msg) from exc
 
 
 def _sql_operation(sql):
@@ -538,7 +630,7 @@ def _sql_operation(sql):
 
 
 def _operation_ends_transaction(operation):
-    return operation == 'commit' or operation == 'rollback'
+    return operation == "commit" or operation == "rollback"
 
 
 def _modifies_rows(operation):
@@ -546,10 +638,15 @@ def _modifies_rows(operation):
     # exec is deliberately excluded because it might return a result set, and
     # this function is used to determine whether it's safe to call
     # cdb2_get_effects after running the operation.
-    return operation in ('commit', 'insert', 'update', 'delete')
+    return operation in ("commit", "insert", "update", "delete")
 
 
-def connect(*args, **kwargs):
+def connect(
+    database_name: str | bytes,
+    tier: str | bytes = "default",
+    autocommit: bool = False,
+    host: str | bytes | None = None,
+) -> Connection:
     """Establish a connection to a Comdb2 database.
 
     All arguments are passed directly through to the `Connection` constructor.
@@ -563,10 +660,15 @@ def connect(*args, **kwargs):
     Returns:
         Connection: A handle for the newly established connection.
     """
-    return Connection(*args, **kwargs)
+    return Connection(
+        database_name=database_name,
+        tier=tier,
+        autocommit=autocommit,
+        host=host,
+    )
 
 
-class Connection(object):
+class Connection:
     """Represents a connection to a Comdb2 database.
 
     By default, the connection will be made to the cluster configured as the
@@ -624,11 +726,18 @@ class Connection(object):
             statements, disabling DB-API 2.0's automatic implicit transactions.
     """
 
-    def __init__(self, database_name, tier="default", autocommit=False,
-                 host=None):
+    def __init__(
+        self,
+        database_name: str | bytes,
+        tier: str | bytes = "default",
+        autocommit: bool = False,
+        host: str | bytes | None = None,
+    ) -> None:
         if host is not None and tier != "default":
-            raise InterfaceError("Connecting to a host by name and to a "
-                                 "cluster by tier are mutually exclusive")
+            raise InterfaceError(
+                "Connecting to a host by name and to a "
+                "cluster by tier are mutually exclusive"
+            )
 
         self._active_cursor = None
         self._in_transaction = False
@@ -643,7 +752,7 @@ class Connection(object):
             raise InterfaceError("Attempted to use a closed Connection")
 
     @property
-    def row_factory(self):
+    def row_factory(self) -> Callable[[list[str]], Callable[[list[Value]], Row]]:
         """Factory used when constructing result rows.
 
         By default, or when set to ``None``, each row is returned as a `list`
@@ -665,7 +774,9 @@ class Connection(object):
         return self._hndl.row_factory
 
     @row_factory.setter
-    def row_factory(self, value):
+    def row_factory(
+        self, value: Callable[[list[str]], Callable[[list[Value]], Row]]
+    ) -> None:
         self._check_closed()
         self._hndl.row_factory = value
 
@@ -683,7 +794,7 @@ class Connection(object):
             cursor = self.cursor()
         cursor._execute(operation, operation)
 
-    def close(self, ack_current_event=True):
+    def close(self, ack_current_event: bool = True) -> None:
         """Gracefully close the Comdb2 connection.
 
         Once a `Connection` has been closed, no further operations may be
@@ -716,7 +827,7 @@ class Connection(object):
         self._hndl.close(ack_current_event=ack_current_event)
         self._hndl = None
 
-    def commit(self):
+    def commit(self) -> None:
         """Commit any pending transaction to the database.
 
         This method will fail if the `Connection` is in ``autocommit`` mode and
@@ -725,7 +836,7 @@ class Connection(object):
         self._check_closed()
         self._execute("commit")
 
-    def rollback(self):
+    def rollback(self) -> None:
         """Rollback the current transaction.
 
         This method will fail if the `Connection` is in ``autocommit`` mode and
@@ -741,7 +852,7 @@ class Connection(object):
         self._check_closed()
         self._execute("rollback")
 
-    def cursor(self):
+    def cursor(self) -> Cursor:
         """Return a new `Cursor` for this connection.
 
         This calls `Cursor.close` on any outstanding `Cursor`; only one
@@ -774,7 +885,7 @@ class Connection(object):
     NotSupportedError = NotSupportedError
 
 
-class Cursor(object):
+class Cursor:
     """Class used to send requests through a database connection.
 
     This class is not meant to be instantiated directly; it should always be
@@ -792,12 +903,12 @@ class Cursor(object):
     """
 
     _ErrorMessagesByOperation = {
-        'begin': "Transactions may not be started explicitly",
-        'commit': "Use Connection.commit to commit transactions",
-        'rollback': "Use Connection.rollback to roll back transactions",
+        "begin": "Transactions may not be started explicitly",
+        "commit": "Use Connection.commit to commit transactions",
+        "rollback": "Use Connection.rollback to roll back transactions",
     }
 
-    def __init__(self, conn):
+    def __init__(self, conn: Connection) -> None:
         self._arraysize = 1
         self._conn = conn
         self._hndl = conn._hndl
@@ -810,7 +921,7 @@ class Cursor(object):
             raise InterfaceError("Attempted to use a closed cursor")
 
     @property
-    def arraysize(self):
+    def arraysize(self) -> int:
         """Controls the number of rows to fetch at a time with `fetchmany`.
 
         The default is ``1``, meaning that a single row will be fetched at
@@ -819,11 +930,13 @@ class Cursor(object):
         return self._arraysize
 
     @arraysize.setter
-    def arraysize(self, value):
+    def arraysize(self, value: int) -> None:
         self._arraysize = value
 
     @property
-    def description(self):
+    def description(
+        self,
+    ) -> tuple[tuple[str, object, None, None, None, None, None], ...] | None:
         """Provides the name and type of each column in the latest result set.
 
         This read-only attribute will contain one element per column in the
@@ -858,7 +971,7 @@ class Cursor(object):
         return self._description
 
     @property
-    def rowcount(self):
+    def rowcount(self) -> int:
         """Provides the count of rows modified by the last transaction.
 
         For `Cursor` objects on a `Connection` that is not using ``autocommit``
@@ -887,12 +1000,12 @@ class Cursor(object):
 
     # Optional DB API Extension
     @property
-    def connection(self):
+    def connection(self) -> Connection:
         """Return a reference to the `Connection` that this `Cursor` uses."""
         self._check_closed()
         return self._conn
 
-    def close(self):
+    def close(self) -> None:
         """Close the cursor now.
 
         From this point forward an exception will be raised if any
@@ -908,7 +1021,7 @@ class Cursor(object):
         self._description = None
         self._closed = True
 
-    def callproc(self, procname, parameters):
+    def callproc(self, procname: str, parameters: Sequence[ParameterValue]) -> Sequence[ParameterValue]:
         """Call a stored procedure with the given name.
 
         The ``parameters`` sequence must contain one entry for each argument
@@ -931,18 +1044,35 @@ class Cursor(object):
         if not _VALID_SP_NAME.match(procname):
             raise NotSupportedError("Invalid procedure name '%s'" % procname)
         params_as_dict = {str(i): e for i, e in enumerate(parameters)}
-        sql = ("exec procedure " + procname + "("
-              + ", ".join("%%(%d)s" % i for i in range(len(params_as_dict)))
-              + ")")
+        sql = (
+            "exec procedure "
+            + procname
+            + "("
+            + ", ".join("%%(%d)s" % i for i in range(len(params_as_dict)))
+            + ")"
+        )
         self.execute(sql, params_as_dict)
         return parameters[:]
 
-    def execute(self, sql, parameters=None):
+    def execute(
+        self,
+        sql: str,
+        parameters: Mapping[str, ParameterValue] | Sequence[ParameterValue] | None = None,
+        *,
+        column_types: Sequence[ColumnType] | None = None,
+    ) -> Cursor:
         """Execute a database operation (query or command).
 
-        The ``sql`` string must be provided as a Python format string, with
-        parameter placeholders represented as ``%(name)s`` and all other ``%``
-        signs escaped as ``%%``.
+        The ``sql`` string may contain either named placeholders represented
+        as ``%(name)s`` or positionally ordered placeholders represented
+        as ``?``.
+
+        When the parameters are a mapping or ``None``, named placeholders are
+        being used, and so any literal ``%`` signs in the statement must be
+        escaped by doubling them, to distinguish them from the start of a named
+        placeholder. When a sequence of parameters is provided instead, any
+        placeholders must be positional ``?`` placeholders, and literal ``%``
+        signs in the SQL must not be escaped.
 
         Note:
             Using placeholders should always be the preferred method of
@@ -950,10 +1080,29 @@ class Cursor(object):
             vulnerabilities, and is faster than dynamically building SQL
             strings.
 
+        If ``column_types`` is provided and non-empty, it must be a sequence of
+        members of the `ColumnType` enumeration. The database will coerce the
+        data in the Nth column of the result set to the Nth given column type.
+        An error will be raised if the number of elements in ``column_types``
+        doesn't match the number of columns in the result set, or if one of the
+        elements is not a supported column type, or if coercion fails. If
+        ``column_types`` is empty or not provided, no coercion is performed.
+
+        Note:
+            Databases APIs are not required to allow result set column types to
+            be specified explicitly. We allow this as a non-standard DB-API 2.0
+            extension.
+
         Args:
             sql (str): The SQL string to execute, as a Python format string.
-            parameters (Mapping[str, Any]): An optional mapping from parameter
-                names to the values to be bound for them.
+            parameters (Mapping[str, Any] | Sequence[Any]):
+                If the SQL statement has ``%(param_name)s`` style placeholders,
+                you must pass a mapping from parameter name to value.
+                If the SQL statement has ``?`` style placeholders, you must
+                instead pass an ordered sequence of parameter values.
+            column_types (Sequence[int]): An optional sequence of types (values
+                of the `ColumnType` enumeration) which the columns of the
+                result set will be coerced to.
 
         Returns:
             Cursor: As a nonstandard DB-API 2.0 extension, this method returns
@@ -971,6 +1120,10 @@ class Cursor(object):
             ...                {'x': 2, 'y': 4})
             >>> cursor.fetchall()
             [[1, 2], [2, 4]]
+
+            >>> cursor.execute("select 1, 2 UNION ALL select ?, ?", [2, 4]])
+            >>> cursor.fetchall()
+            [[1, 2], [2, 4]]
         """
         self._check_closed()
         self._description = None
@@ -982,14 +1135,16 @@ class Cursor(object):
             if errmsg:
                 raise InterfaceError(errmsg)
 
-        self._execute(operation, sql, parameters)
+        self._execute(operation, sql, parameters, column_types=column_types)
         if self._rowcount == -1:
             self._load_description()
         # Optional DB API Extension: execute's return value is unspecified.  We
         # return an iterable over the rows, but this isn't portable across DBs.
         return self
 
-    def executemany(self, sql, seq_of_parameters):
+    def executemany(
+        self, sql: str, seq_of_parameters: Sequence[Mapping[str, ParameterValue]] | Sequence[Sequence[ParameterValue]]
+    ) -> None:
         """Execute the same SQL statement repeatedly with different parameters.
 
         This is currently equivalent to calling execute multiple times, once
@@ -998,16 +1153,16 @@ class Cursor(object):
         Args:
             sql (str): The SQL string to execute, as a Python format string of
                 the format expected by `execute`.
-            seq_of_parameters (Sequence[Mapping[str, Any]]): A sequence of
-                mappings from parameter names to the values to be bound for
-                them.  The ``sql`` statement will be run once per element in
-                this sequence.
+            seq_of_parameters (Sequence[Mapping[str, Any]] | Sequence[Sequence[Any]]):
+                The ``sql`` statement will be executed once per element in this
+                sequence, using each successive element as the parameter values
+                for the corresponding call to `.execute`.
         """
         self._check_closed()
         for parameters in seq_of_parameters:
             self.execute(sql, parameters)
 
-    def _execute(self, operation, sql, parameters=None):
+    def _execute(self, operation, sql, parameters=None, *, column_types=None):
         self._rowcount = -1
 
         if not self._conn._autocommit:
@@ -1025,23 +1180,26 @@ class Cursor(object):
         try:
             # If variable interpolation fails, then translate the exception to
             # an InterfaceError to signal that it's a client-side problem.
-            sql = sql % {name: "@" + name for name in parameters}
+            # If binding by index then no need to modify sql
+            by_name = hasattr(parameters, "items")
+            if by_name:
+                sql = sql % {name: "@" + name for name in parameters}
         except KeyError as keyerr:
             msg = "No value provided for parameter %s" % keyerr
-            six.raise_from(InterfaceError(msg), keyerr)
+            raise InterfaceError(msg) from keyerr
         except Exception as exc:
             msg = "Invalid Python format string for query"
-            six.raise_from(InterfaceError(msg), exc)
+            raise InterfaceError(msg) from exc
 
         if _operation_ends_transaction(operation):
             self._conn._in_transaction = False  # txn ends, even on failure
 
         try:
-            self._hndl.execute(sql, parameters)
+            self._hndl.execute(sql, parameters, column_types=column_types)
         except cdb2.Error as e:
             _raise_wrapped_exception(e)
 
-        if operation == 'begin':
+        if operation == "begin":
             self._conn._in_transaction = True  # txn successfully started
         elif not self._conn._in_transaction and _modifies_rows(operation):
             # We're not in a transaction, and the last statement could have
@@ -1050,11 +1208,11 @@ class Cursor(object):
             # an explicit transaction.  We can get the count of affected rows.
             self._update_rowcount()
 
-    def setinputsizes(self, sizes):
+    def setinputsizes(self, sizes: Sequence[Any]) -> None:
         """No-op; implemented for PEP-249 compliance."""
         self._check_closed()
 
-    def setoutputsize(self, size, column=None):
+    def setoutputsize(self, size: Any, column: int = None) -> None:
         """No-op; implemented for PEP-249 compliance."""
         self._check_closed()
 
@@ -1067,12 +1225,14 @@ class Cursor(object):
     def _load_description(self):
         names = self._hndl.column_names()
         types = self._hndl.column_types()
-        self._description = tuple((name, type, None, None, None, None, None)
-                                  for name, type in zip(names, types))
+        self._description = tuple(
+            (name, type, None, None, None, None, None)
+            for name, type in zip(names, types)
+        )
         if not self._description:
             self._description = None
 
-    def fetchone(self):
+    def fetchone(self) -> Row | None:
         """Fetch the next row of the current result set.
 
         Returns:
@@ -1087,7 +1247,7 @@ class Cursor(object):
         except StopIteration:
             return None
 
-    def fetchmany(self, n=None):
+    def fetchmany(self, n: int | None = None) -> List[Row]:
         """Fetch the next set of rows of the current result set.
 
         Args:
@@ -1107,7 +1267,7 @@ class Cursor(object):
             n = self._arraysize
         return [x for x in itertools.islice(self, 0, n)]
 
-    def fetchall(self):
+    def fetchall(self) -> List[Row]:
         """Fetch all remaining rows of the current result set.
 
         Returns:
@@ -1120,7 +1280,7 @@ class Cursor(object):
         return [x for x in self]
 
     # Optional DB API Extension
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Row]:
         """Iterate over all rows in a result set.
 
         By default each row is returned as a `list`, where the elements in the

@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_dispatch:
   push:
   pull_request:
   release:
@@ -24,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout bloomberg-comdb2 repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: bloomberg/comdb2
           path: bloomberg-comdb2
@@ -46,6 +47,7 @@ jobs:
             ncurses-dev
             protobuf-c-compiler
             tcl
+            tcl-dev
             uuid-dev
             zlib1g-dev
         '
@@ -55,13 +57,14 @@ jobs:
             mkdir bloomberg-comdb2/build &&
             cd bloomberg-comdb2/build &&
             cmake .. &&
-            make
+            make &&
+            sudo make install
           )
         '
       - name: Archive bloomberg-comdb2 repo with build artifacts
-        run: 'tar czvf bloomberg-comdb2.tar.gz bloomberg-comdb2/'
-      - name: Upload bloomberg-comdb2 repo with build artifacts
-        uses: actions/upload-artifact@v3
+        run: 'tar -C /opt -czvf bloomberg-comdb2.tar.gz bb'
+      - name: Upload built bloomberg-comdb2
+        uses: actions/upload-artifact@v7
         with:
           name: bloomberg-comdb2
           path: ./bloomberg-comdb2.tar.gz
@@ -72,36 +75,32 @@ jobs:
     needs: [build_bloomberg_comdb2]
     steps:
       - name: Download bloomberg-comdb2 with build artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: bloomberg-comdb2
           path: .
       - name: Install bloomberg-comdb2
         run: '
-          sudo apt-get install -qy
-            libevent-dev
-            liblz4-dev
-            libprotobuf-c-dev
-            libsqlite3-dev
-            libssl-dev
-            libunwind-dev
-            zlib1g-dev &&
-          tar xvf bloomberg-comdb2.tar.gz &&
-          (cd bloomberg-comdb2/build && sudo make install)
+          sudo apt-get update &&
+          sudo apt-get install -qy libprotobuf-c-dev libssl-dev libunwind-dev &&
+          sudo tar -C /opt -xzf bloomberg-comdb2.tar.gz &&
+          find /opt/bb &&
+          rm bloomberg-comdb2.tar.gz
         '
-      - uses: actions/checkout@v4
-      - name: 'Set up Python 3.7'
-        uses: actions/setup-python@v4  # note that this step overwrites the PKG_CONFIG_PATH variable
+      - uses: actions/checkout@v6
+      - name: 'Set up Python 3.8'
+        uses: actions/setup-python@v6  # note that this step overwrites the PKG_CONFIG_PATH variable
         with:
-          python-version: '3.7'  # the lowest version that we support in CI
+          python-version: '3.8'  # the lowest version that we support in CI
       - name: Build sdist
         run: '
+          sudo apt-get update &&
           sudo apt-get install -qy pkg-config &&
           PKG_CONFIG_PATH=/opt/bb/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
           pipx run build --sdist
         '
       - name: Upload sdist
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           name: python-comdb2-sdist
           path: dist/*.tar.gz
@@ -113,30 +112,26 @@ jobs:
     strategy:
       matrix:
         python-version:
+          - '3.14-dev'
+          - '3.13'
           - '3.12'
           - '3.11'
           - '3.10'
           - '3.9'
           - '3.8'
-          - '3.7'
     steps:
       - name: Download comdb2 repo with build artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: bloomberg-comdb2
           path: .
       - name: Install bloomberg-comdb2
         run: '
-          sudo apt-get install -qy
-            libevent-dev
-            liblz4-dev
-            libprotobuf-c-dev
-            libsqlite3-dev
-            libssl-dev
-            libunwind-dev
-            zlib1g-dev &&
-          tar xvf bloomberg-comdb2.tar.gz &&
-          (cd bloomberg-comdb2/build && sudo make install)
+          sudo apt-get update &&
+          sudo apt-get install -qy libprotobuf-c-dev libssl-dev libunwind-dev &&
+          sudo tar -C /opt -xzf bloomberg-comdb2.tar.gz &&
+          find /opt/bb &&
+          rm bloomberg-comdb2.tar.gz
         '
       - name: Start local comdb2 instance
         run: '
@@ -159,7 +154,7 @@ jobs:
           done
         '
       - name: Download python-comdb2 sdist
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: python-comdb2-sdist
           path: dist
@@ -177,12 +172,13 @@ jobs:
             echo "Creating $table_name from $table_file"
             /opt/bb/bin/cdb2sql "$COMDB2_DBNAME" local "create table $table_name { $(cat $table_file) }"
           done
-      - name: Set up Python ${{matrix.python_version}}
-        uses: actions/setup-python@v4  # note that this step overwrites the PKG_CONFIG_PATH variable
+      - name: Set up Python ${{matrix.python-version}}
+        uses: actions/setup-python@v6  # note that this step overwrites the PKG_CONFIG_PATH variable
         with:
-          python-version: "${{matrix.python_version}}"
+          python-version: "${{matrix.python-version}}"
       - name: Install python-comdb2 from the sdist
         run: '
+          sudo apt-get update &&
           sudo apt-get install -qy pkg-config &&
           python -m pip install --upgrade pip &&
           PKG_CONFIG_PATH=/opt/bb/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH

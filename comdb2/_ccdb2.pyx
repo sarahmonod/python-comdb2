@@ -20,9 +20,7 @@ from cpython.ref cimport Py_TYPE, PyObject
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 import datetime
-
-from pytz import timezone, UTC
-import six
+import sys
 
 from ._cdb2_types import Error, Effects, DatetimeUs
 from . cimport _cdb2api as lib
@@ -38,6 +36,11 @@ cdef PyTypeObject *DatetimeUsType = Py_TYPE(DatetimeUs(1, 1, 1))
 ctypedef fused client_datetime:
     lib.cdb2_client_datetime_t
     lib.cdb2_client_datetimeus_t
+
+
+cdef struct blob_descriptor:
+    size_t size
+    char* data
 
 
 cdef _string_as_bytes(s):
@@ -78,6 +81,11 @@ cdef _describe_exception(exc):
 
 
 cdef _bind_datetime(obj, client_datetime *val):
+    if obj.tzinfo is None:
+        obj = obj.replace(tzinfo=datetime.timezone.utc)
+    else:
+        obj = obj.astimezone(datetime.timezone.utc)
+
     if client_datetime is lib.cdb2_client_datetimeus_t:
         val.usec = obj.microsecond
     else:
@@ -100,20 +108,22 @@ cdef _bind_datetime(obj, client_datetime *val):
 
 
 cdef class _ParameterValue(object):
-    cdef int type
+    cdef lib.cdb2_coltype type
     cdef int size
     cdef void *data
     cdef object owner
+    cdef int list_size
 
     def __cinit__(self, obj, param_name):
         try:
+            self.list_size = -1
             if obj is None:
                 self.type = lib.CDB2_INTEGER
                 self.owner = None
                 self.size = 0
                 self.data = NULL
                 return
-            elif isinstance(obj, six.integer_types):
+            elif isinstance(obj, int):
                 self.type = lib.CDB2_INTEGER
                 self.owner = None
                 self.size = sizeof(long long)
@@ -153,6 +163,62 @@ cdef class _ParameterValue(object):
                 self.data = PyMem_Malloc(self.size)
                 _bind_datetime(obj, <lib.cdb2_client_datetime_t*>self.data)
                 return
+            elif isinstance(obj, (list, tuple)):
+                self.list_size = len(obj)
+                if 0 == self.list_size:
+                    raise ValueError(f"empty {type(obj).__name__}s cannot be bound")
+
+                if all(isinstance(ele, int) for ele in obj):
+                    self.type = lib.CDB2_INTEGER
+                    self.size = sizeof(long long)
+                    self.owner = None
+                    self.data = PyMem_Malloc(self.list_size * self.size)
+                    for l_index in range(self.list_size):
+                        (<long long*>self.data)[l_index] = obj[l_index]
+                    return
+                elif all(isinstance(ele, float) for ele in obj):
+                    self.type = lib.CDB2_REAL
+                    self.size = sizeof(double)
+                    self.owner = None
+                    self.data = PyMem_Malloc(self.list_size * self.size)
+                    for l_index in range(self.list_size):
+                        (<double*>self.data)[l_index] = obj[l_index]
+                    return
+                elif all(isinstance(ele, bytes) for ele in obj):
+                    if isinstance(obj, tuple):
+                        owner = obj
+                    else:
+                        # Copy the list into a tuple. If we referenced the list
+                        # directly, another thread could remove an element when
+                        # we drop the GIL, invalidating a pointer we're holding
+                        owner = tuple(obj)
+
+                    self.type = lib.CDB2_BLOB
+                    self.size = sizeof(blob_descriptor)
+                    self.owner = owner
+                    self.data = PyMem_Malloc(self.list_size * self.size)
+                    for l_index in range(self.list_size):
+                        (<blob_descriptor*>self.data)[l_index].size = len(obj[l_index])
+                        (<blob_descriptor*>self.data)[l_index].data = obj[l_index]
+                    return
+                elif all(isinstance(ele, unicode) for ele in obj):
+                    self.type = lib.CDB2_CSTRING
+                    self.size = sizeof(char*)
+                    # Strings need to be converted to bytes
+                    self.owner = [x.encode('utf-8') for x in obj]
+                    self.data = PyMem_Malloc(self.list_size * self.size)
+                    for l_index in range(self.list_size):
+                        (<char**>self.data)[l_index] = <char*>(self.owner[l_index])
+                    return
+                elif not all(isinstance(ele, type(obj[0])) for ele in obj):
+                    raise ValueError(
+                        f"all {type(obj).__name__} elements must be the same type"
+                    )
+                else:
+                    raise ValueError(
+                        f"Cannot bind a {type(obj).__name__} of {type(obj[0]).__name__}"
+                    )
+
         except Exception as e:
             exc = e
         else:
@@ -161,15 +227,15 @@ cdef class _ParameterValue(object):
         exc_desc = _describe_exception(exc)
 
         if exc is not None:
-            errmsg = "Can't bind %s value %r for parameter '%s': %s" % (
+            errmsg = "Can't bind %s value %r for parameter %r: %s" % (
                 type(obj).__name__,
                 obj,
                 param_name,
                 exc_desc,
             )
-            six.raise_from(Error(lib.CDB2ERR_CONV_FAIL, errmsg), exc)
+            raise Error(lib.CDB2ERR_CONV_FAIL, errmsg) from exc
         else:
-            errmsg = "Can't map %s value %r for parameter '%s' to a Comdb2 type" % (
+            errmsg = "Can't map %s value %r for parameter %r to a Comdb2 type" % (
                 type(obj).__name__,
                 obj,
                 param_name,
@@ -178,7 +244,7 @@ cdef class _ParameterValue(object):
 
 
     def __dealloc__(self):
-        if self.owner is None:
+        if self.owner is None or self.list_size != -1:
             PyMem_Free(self.data)
 
 
@@ -199,11 +265,13 @@ cdef _make_datetime(client_datetime *val):
                     val.tm.tm_min,
                     val.tm.tm_sec,
                     usec,
-                    UTC,
+                    datetime.timezone.utc,
                     pytype)
 
-    return timezone(val.tzname).localize(
-        PyDateTimeAPI.DateTime_FromDateAndTime(
+    if sys.version_info >= (3, 14):
+        from zoneinfo import ZoneInfo
+
+        return PyDateTimeAPI.DateTime_FromDateAndTimeAndFold(
                     val.tm.tm_year + 1900,
                     val.tm.tm_mon + 1,
                     val.tm.tm_mday,
@@ -211,9 +279,24 @@ cdef _make_datetime(client_datetime *val):
                     val.tm.tm_min,
                     val.tm.tm_sec,
                     usec,
-                    None,
-                    pytype),
-        val.tm.tm_isdst)
+                    ZoneInfo(val.tzname),
+                    not val.tm.tm_isdst,
+                    pytype)
+    else:
+        from pytz import timezone
+
+        return timezone(val.tzname).localize(
+            PyDateTimeAPI.DateTime_FromDateAndTime(
+                        val.tm.tm_year + 1900,
+                        val.tm.tm_mon + 1,
+                        val.tm.tm_mday,
+                        val.tm.tm_hour,
+                        val.tm.tm_min,
+                        val.tm.tm_sec,
+                        usec,
+                        None,
+                        pytype),
+            val.tm.tm_isdst)
 
 
 cdef _column_value(lib.cdb2_hndl_tp *hndl, int col):
@@ -248,7 +331,7 @@ cdef _column_value(lib.cdb2_hndl_tp *hndl, int col):
 
     if exc is not None:
         errmsg += _describe_exception(exc)
-        six.raise_from(Error(lib.CDB2ERR_CONV_FAIL, errmsg), exc)
+        raise Error(lib.CDB2ERR_CONV_FAIL, errmsg) from exc
     else:
         errmsg += "Unsupported column type"
         raise Error(lib.CDB2ERR_NOTSUPPORTED, errmsg)
@@ -289,7 +372,7 @@ cdef class _Cursor(object):
                 ret = self.row_class(ret)
             except Exception as e:
                 errmsg = "Instantiating row failed: " + _describe_exception(e)
-                six.raise_from(Error(lib.CDB2ERR_UNKNOWN, errmsg), e)
+                raise Error(lib.CDB2ERR_UNKNOWN, errmsg) from e
         return ret
 
 
@@ -329,8 +412,8 @@ cdef class Handle(object):
         self.hndl = NULL
         _errchk(rc, self.hndl)
 
-    def execute(self, sql, parameters=None):
-        """execute(sql, params) -> Cursor over a SQL statement's result set"""
+    def execute(self, sql, parameters=None, int[::1] column_types=None):
+        """execute(sql, params, types) -> Cursor over a SQL statement's result set"""
         if not self.hndl: raise _closed_connection_error('execute')
         self.cursor = NULL
         sql = _string_as_bytes(sql)
@@ -339,19 +422,46 @@ cdef class Handle(object):
         param_guards = []
         try:
             if parameters is not None:
-                for key, val in parameters.items():
-                    ckey = _string_as_bytes(key)
+                if hasattr(parameters, "items"):
+                    items = parameters.items()
+                    bind_by_index = False
+                else:
+                    items = enumerate(parameters, 1)
+                    bind_by_index = True
+
+                for key, val in items:
+                    ckey = key if bind_by_index else _string_as_bytes(key)
                     cval = _ParameterValue(val, key)
                     param_guards.append(ckey)
                     param_guards.append(cval)
-                    rc = lib.cdb2_bind_param(self.hndl, <char*>ckey,
-                                             cval.type, cval.data, cval.size)
+                    bind_array = (cval.list_size != -1)
+                    if bind_array:
+                        if bind_by_index:
+                            rc = lib.cdb2_bind_array_index(self.hndl, ckey,
+                                                           cval.type, cval.data,
+                                                           cval.list_size, cval.size)
+                        else:
+                            rc = lib.cdb2_bind_array(self.hndl, <char*>ckey,
+                                                     cval.type, cval.data,
+                                                     cval.list_size, cval.size)
+                    else:
+                        if bind_by_index:
+                            rc = lib.cdb2_bind_index(self.hndl, ckey,
+                                                     cval.type, cval.data, cval.size)
+                        else:
+                            rc = lib.cdb2_bind_param(self.hndl, <char*>ckey,
+                                                     cval.type, cval.data, cval.size)
                     _errchk(rc, self.hndl)
 
             with nogil:
                 while lib.cdb2_next_record(self.hndl) == lib.CDB2_OK:
                     pass  # consume any previous result set
-                rc = lib.cdb2_run_statement(self.hndl, c_sql)
+                if column_types is None:
+                    rc = lib.cdb2_run_statement(self.hndl, c_sql)
+                else:
+                    rc = lib.cdb2_run_statement_typed(
+                        self.hndl, c_sql, len(column_types), &column_types[0]
+                    )
             _errchk(rc, self.hndl)
         finally:
             rc = lib.cdb2_clearbindings(self.hndl)
@@ -393,7 +503,7 @@ cdef class Handle(object):
                 row_class = self._row_factory(self.column_names())
             except Exception as e:
                 errmsg = "row_factory call failed: " + _describe_exception(e)
-                six.raise_from(Error(lib.CDB2ERR_UNKNOWN, errmsg), e)
+                raise Error(lib.CDB2ERR_UNKNOWN, errmsg) from e
 
         cdef _Cursor ret = _Cursor.__new__(_Cursor)
         ret.handle = self

@@ -87,9 +87,9 @@ them if you so choose, but you are not required to.
 
     Creates an object suitable for binding as a BLOB parameter.
 
-    If the input argument was a `six.text_type` Unicode string, it is
-    encoded as a UTF-8 byte string and returned.  Otherwise, the input
-    argument is passed to the `bytes` constructor, and the result returned.
+    If the input argument was a `str` object, it is encoded as a UTF-8 byte
+    string and returned.  Otherwise, the input argument is passed to the
+    `bytes` constructor, and the result returned.
 
     :param string: A string from which the new object is constructed
     :rtype: `bytes`
@@ -123,6 +123,11 @@ for consistency with the required DATETIME constructors documented above.
     :returns: An object representing the date and time ``seconds_since_epoch``
         after the Unix epoch, with microsecond precision
     :rtype: `DatetimeUs`
+
+.. class:: ColumnType
+
+    This is an alias for `comdb2.cdb2.ColumnType`, reexported from
+    ``comdb2.dbapi2`` for convenience.
 
 .. _Exceptions:
 

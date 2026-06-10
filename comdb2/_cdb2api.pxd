@@ -18,7 +18,7 @@ cdef extern from "cdb2api.h" nogil:
         CDB2ERR_NOTSUPPORTED
         CDB2ERR_CONV_FAIL
 
-    enum:
+    enum cdb2_coltype:
         CDB2_INTEGER
         CDB2_REAL
         CDB2_CSTRING
@@ -63,17 +63,21 @@ cdef extern from "cdb2api.h" nogil:
     ctypedef struct cdb2_hndl_tp:
         pass
 
-    int cdb2_open(cdb2_hndl_tp **hndl, const char *dbname, const char *type, int flags);
-    int cdb2_next_record(cdb2_hndl_tp *hndl);
-    int cdb2_get_effects(cdb2_hndl_tp *hndl, cdb2_effects_tp *effects);
-    int cdb2_close(cdb2_hndl_tp* hndl);
-    int cdb2_run_statement(cdb2_hndl_tp *hndl, const char *sql);
-    int cdb2_numcolumns(cdb2_hndl_tp* hndl);
-    const char* cdb2_column_name(cdb2_hndl_tp* hndl, int col);
-    int cdb2_column_type(cdb2_hndl_tp* hndl, int col);
-    int cdb2_column_size(cdb2_hndl_tp* hndl, int col);
-    void* cdb2_column_value(cdb2_hndl_tp* hndl, int col);
-    const char* cdb2_errstr(cdb2_hndl_tp* hndl);
-    int cdb2_bind_param(cdb2_hndl_tp *hndl, const char *name, int type, const void *varaddr, int length);
-    int cdb2_clearbindings(cdb2_hndl_tp *hndl);
-    int cdb2_clear_ack(cdb2_hndl_tp *hndl);
+    int cdb2_open(cdb2_hndl_tp **hndl, const char *dbname, const char *type, int flags) except +
+    int cdb2_next_record(cdb2_hndl_tp *hndl) except +
+    int cdb2_get_effects(cdb2_hndl_tp *hndl, cdb2_effects_tp *effects) except +
+    int cdb2_close(cdb2_hndl_tp* hndl) except +
+    int cdb2_run_statement(cdb2_hndl_tp *hndl, const char *sql) except +
+    int cdb2_run_statement_typed(cdb2_hndl_tp *hndl, const char *sql, int num_types, int *types) except +
+    int cdb2_numcolumns(cdb2_hndl_tp* hndl) except +
+    const char* cdb2_column_name(cdb2_hndl_tp* hndl, int col) except +
+    int cdb2_column_type(cdb2_hndl_tp* hndl, int col) except +
+    int cdb2_column_size(cdb2_hndl_tp* hndl, int col) except +
+    void* cdb2_column_value(cdb2_hndl_tp* hndl, int col) except +
+    const char* cdb2_errstr(cdb2_hndl_tp* hndl) except +
+    int cdb2_bind_param(cdb2_hndl_tp *hndl, const char *name, int type, const void *varaddr, int length) except +
+    int cdb2_bind_index(cdb2_hndl_tp *hndl, int index, int type, const void *varaddr, int length) except +
+    int cdb2_bind_array(cdb2_hndl_tp *hndl, const char *name, cdb2_coltype, const void *varaddr, size_t count, size_t typelen) except +
+    int cdb2_bind_array_index(cdb2_hndl_tp *hndl, int index, cdb2_coltype, const void *varaddr, size_t count, size_t typelen) except +
+    int cdb2_clearbindings(cdb2_hndl_tp *hndl) except +
+    int cdb2_clear_ack(cdb2_hndl_tp *hndl) except +
